@@ -1,103 +1,90 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+// Fork元の方を使う場合は import * as PIXI from 'pixi.js'; と呼び方、などなど変わるので、そちらのREADMEを参照して変えましょう
+import { Application, Ticker, DisplayObject } from "pixi.js";
+import { useEffect, useRef, useState } from "react";
+import { Live2DModel } from "pixi-live2d-display-lipsyncpatch/cubism4";
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+const setModelPosition = (
+  app: Application,
+  model: InstanceType<typeof Live2DModel>
+) => {
+  const scale = (app.renderer.width * 1) / model.width;
+  model.scale.set(scale);
+  model.x = app.renderer.width - model.width * scale - 20;
+  model.y = app.renderer.height - model.height * scale;
+};
+
+export default function Live2D() {
+  const canvasContainerRef = useRef<HTMLCanvasElement>(null);
+  const [app, setApp] = useState<Application | null>(null);
+  const [model, setModel] = useState<InstanceType<typeof Live2DModel> | null>(
+    null
   );
+
+  const initApp = () => {
+    if (!canvasContainerRef.current) return;
+
+    const app = new Application({
+      width: canvasContainerRef.current.clientWidth,
+      height: canvasContainerRef.current.clientHeight,
+      view: canvasContainerRef.current,
+      backgroundAlpha: 0,
+    });
+
+    setApp(app);
+    initLive2D(app);
+  };
+
+  const initLive2D = async (currentApp: Application) => {
+    if (!canvasContainerRef.current) return;
+
+    try {
+      const model = await Live2DModel.from(
+        "/live2d/Resources/Haru/Haru.model3.json",
+        { ticker: Ticker.shared }
+      );
+
+      currentApp.stage.addChild(model as unknown as DisplayObject);
+
+      model.anchor.set(0.5, 0.5);
+      setModelPosition(currentApp, model);
+
+      model.on("hit", (hitAreas) => {
+        if (hitAreas.includes("Body")) {
+          model.motion("Tap@Body");
+        }
+      });
+
+      setModel(model);
+    } catch (error) {
+      console.error("Failed to load Live2D model:", error);
+    }
+  };
+
+  useEffect(() => {
+    if (!app || !model) return;
+
+    const onResize = () => {
+      if (!canvasContainerRef.current) return;
+
+      app.renderer.resize(
+        canvasContainerRef.current.clientWidth,
+        canvasContainerRef.current.clientHeight
+      );
+
+      setModelPosition(app, model);
+    };
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, [app, model]);
+
+  useEffect(() => {
+    initApp();
+  }, []);
+
+  return <canvas ref={canvasContainerRef} className="w-full h-full" />;
 }
