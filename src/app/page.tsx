@@ -7,7 +7,7 @@ import { Live2DModel } from "pixi-live2d-display-lipsyncpatch/cubism4";
 
 const setModelPosition = (
   app: Application,
-  model: InstanceType<typeof Live2DModel>
+  model: Live2DModel
 ) => {
   const scale = (app.renderer.width * 1) / model.width;
   model.scale.set(scale);
@@ -18,9 +18,7 @@ const setModelPosition = (
 export default function Live2D() {
   const canvasContainerRef = useRef<HTMLCanvasElement>(null);
   const [app, setApp] = useState<Application | null>(null);
-  const [model, setModel] = useState<InstanceType<typeof Live2DModel> | null>(
-    null
-  );
+  const [model, setModel] = useState<Live2DModel | null>(null);
 
   const initApp = () => {
     if (!canvasContainerRef.current) return;
@@ -40,6 +38,7 @@ export default function Live2D() {
     if (!canvasContainerRef.current) return;
 
     try {
+      const { Live2DModel } = await import("pixi-live2d-display-lipsyncpatch/cubism4");
       const model = await Live2DModel.from(
         "/live2d/Resources/Haru/Haru.model3.json",
         { ticker: Ticker.shared }
