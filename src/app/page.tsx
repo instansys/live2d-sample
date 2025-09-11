@@ -9,10 +9,10 @@ const setModelPosition = (
   app: Application,
   model: Live2DModel
 ) => {
-  const scale = (app.renderer.width * 1) / model.width;
+  const scale = (app.renderer.width * 0.4) / model.width;
   model.scale.set(scale);
-  model.x = app.renderer.width - model.width * scale - 20;
-  model.y = app.renderer.height - model.height * scale;
+  model.x = app.renderer.width / 2;
+  model.y = app.renderer.height - model.height * scale * 0.3;
 };
 
 export default function Live2D() {
@@ -27,7 +27,7 @@ export default function Live2D() {
       width: canvasContainerRef.current.clientWidth,
       height: canvasContainerRef.current.clientHeight,
       view: canvasContainerRef.current,
-      backgroundAlpha: 0,
+      background: 0xffffff,
     });
 
     setApp(app);
