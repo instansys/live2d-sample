@@ -3,10 +3,7 @@ import { Application, Ticker, DisplayObject } from "pixi.js";
 import { useEffect, useRef, useState } from "react";
 import { Live2DModel } from "pixi-live2d-display-lipsyncpatch/cubism4";
 
-const setModelPosition = (
-  app: Application,
-  model: Live2DModel
-) => {
+const setModelPosition = (app: Application, model: Live2DModel) => {
   const scale = (app.renderer.width * 0.4) / model.width;
   model.scale.set(scale);
   model.x = app.renderer.width / 2;
@@ -60,7 +57,7 @@ export default function Live2D() {
       try {
         await model.speak(audioUrl);
       } catch (error) {
-        console.error('Failed to play sound with lipsync:', error);
+        console.error("Failed to play sound with lipsync:", error);
       }
     }
   };
@@ -83,10 +80,12 @@ export default function Live2D() {
     if (!canvasContainerRef.current) return;
 
     try {
-      const { Live2DModel } = await import("pixi-live2d-display-lipsyncpatch/cubism4");
+      const { Live2DModel } = await import(
+        "pixi-live2d-display-lipsyncpatch/cubism4"
+      );
       const model = await Live2DModel.from(
         "/live2d/Resources/Haru/Haru.model3.json",
-        { ticker: Ticker.shared }
+        { ticker: Ticker.shared },
       );
 
       currentApp.stage.addChild(model as unknown as DisplayObject);
@@ -114,7 +113,7 @@ export default function Live2D() {
 
       app.renderer.resize(
         canvasContainerRef.current.clientWidth,
-        canvasContainerRef.current.clientHeight
+        canvasContainerRef.current.clientHeight,
       );
 
       setModelPosition(app, model);
