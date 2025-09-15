@@ -34,10 +34,18 @@ const sounds = [
   { name: "音声4", file: "haru_talk_13.wav" },
 ];
 
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 export default function Live2D() {
   const canvasContainerRef = useRef<HTMLCanvasElement>(null);
   const [app, setApp] = useState<Application | null>(null);
   const [model, setModel] = useState<Live2DModel | null>(null);
+  const [inputText, setInputText] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
   const playMotion = (group: string, index: number) => {
     if (model) {
@@ -57,8 +65,55 @@ export default function Live2D() {
       try {
         await model.speak(audioUrl);
       } catch (error) {
-        console.error("Failed to play sound with lipsync:", error);
+        console.error("音声再生に失敗しました:", error);
       }
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || isLoading) return;
+
+    const userMessage: Message = { role: "user", content: inputText.trim() };
+    setMessages(prev => [...prev, userMessage]);
+    setInputText("");
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [...messages, userMessage],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("チャット応答の取得に失敗しました");
+      }
+
+      const data = await response.json();
+      const assistantMessage: Message = { 
+        role: "assistant", 
+        content: data.message 
+      };
+      
+      setMessages(prev => [...prev, assistantMessage]);
+
+      // 応答を音声で再生
+      if (model && data.audioUrl) {
+        try {
+          await model.speak(data.audioUrl);
+        } catch (error) {
+          console.error("音声再生に失敗しました:", error);
+        }
+      }
+    } catch (error) {
+      console.error("メッセージ送信に失敗しました:", error);
+      alert("メッセージの送信に失敗しました");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -101,7 +156,7 @@ export default function Live2D() {
 
       setModel(model);
     } catch (error) {
-      console.error("Failed to load Live2D model:", error);
+      console.error("Live2Dモデルの読み込みに失敗しました:", error);
     }
   };
 
@@ -136,6 +191,46 @@ export default function Live2D() {
       </div>
       <div className="w-80 p-4 bg-gray-100 overflow-y-auto">
         <div className="space-y-6">
+          <div>
+            <h3 className="text-lg text-gray-700 font-semibold mb-2">チャット</h3>
+            <div className="space-y-3">
+              <textarea
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="メッセージを入力してください"
+                className="w-full h-24 p-3 border border-gray-300 text-gray-700 rounded resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+              />
+              <button
+                onClick={handleSendMessage}
+                disabled={isLoading || !inputText.trim()}
+                className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-400 transition-colors"
+              >
+                {isLoading ? "処理中..." : "送信"}
+              </button>
+            </div>
+            {messages.length > 0 && (
+              <div className="mt-4 max-h-48 overflow-y-auto bg-white p-3 rounded border">
+                {messages.map((message, index) => (
+                  <div key={index} className={`mb-2 ${message.role === 'user' ? 'text-right' : 'text-left'}`}>
+                    <div className={`inline-block p-2 rounded text-sm max-w-xs ${
+                      message.role === 'user' 
+                        ? 'bg-blue-500 text-white' 
+                        : 'bg-gray-200 text-gray-800'
+                    }`}>
+                      {message.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div>
             <h3 className="text-lg font-semibold mb-2">モーション</h3>
             <div className="grid grid-cols-2 gap-2">
