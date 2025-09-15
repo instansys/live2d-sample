@@ -46,6 +46,10 @@ export default function Live2D() {
   const [inputText, setInputText] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const audioQueueRef = useRef<{ text: string; audioUrl: string | null; id: number }[]>([]);
+  const chunkIdRef = useRef<number>(0);
+  const isProcessingQueueRef = useRef<boolean>(false);
 
   const playMotion = (group: string, index: number) => {
     if (model) {
@@ -70,6 +74,146 @@ export default function Live2D() {
     }
   };
 
+  // 30文字ずつで分割する関数
+  const splitByCharacters = (text: string): { completed: string[], remaining: string } => {
+    const completed: string[] = [];
+    let currentText = text;
+    
+    // 30文字以上ある間は分割を続ける
+    while (currentText.length >= 30) {
+      // 30文字で切り取る
+      let chunk = currentText.substring(0, 30);
+      
+      // より自然な区切り位置を探す（句読点、スペース等）
+      const naturalBreaks = [20, 25, 30]; // 後ろから優先的に探す
+      let bestBreakPoint = 30;
+      
+      for (const pos of naturalBreaks.reverse()) {
+        if (pos < currentText.length) {
+          const char = currentText[pos];
+          if (char === '。' || char === '、' || char === ' ' || char === '\n') {
+            bestBreakPoint = pos + 1;
+            break;
+          }
+        }
+      }
+      
+      chunk = currentText.substring(0, bestBreakPoint);
+      completed.push(chunk.trim());
+      currentText = currentText.substring(bestBreakPoint).trim();
+    }
+    
+    return { completed, remaining: currentText };
+  };
+
+  // onFinish付きの順序保証音声キュー処理
+  const processAudioQueue = () => {
+    console.log("processAudioQueue呼び出し - 処理中:", isProcessingQueueRef.current, "キュー長:", audioQueueRef.current.length);
+    
+    if (isProcessingQueueRef.current || !model || audioQueueRef.current.length === 0) {
+      return;
+    }
+
+    // 最初の要素が音声生成完了しているかチェック
+    const firstItem = audioQueueRef.current[0];
+    console.log("最初の要素チェック:", firstItem?.text, "音声URL存在:", !!firstItem?.audioUrl);
+    
+    if (!firstItem || firstItem.audioUrl === null) {
+      // まだ音声生成中なので少し待ってから再試行
+      console.log("音声生成中のため100ms待機");
+      setTimeout(() => processAudioQueue(), 100);
+      return;
+    }
+
+    isProcessingQueueRef.current = true;
+    setIsPlayingAudio(true);
+    
+    const audioItem = audioQueueRef.current.shift()!;
+    console.log("音声再生開始:", audioItem.text);
+
+    // onFinishコールバックを使って次の音声再生を制御
+    model.speak(audioItem.audioUrl!, {
+      onFinish: () => {
+        console.log("音声再生完了:", audioItem.text);
+        setIsPlayingAudio(false);
+        isProcessingQueueRef.current = false;
+        
+        // 次の音声があれば継続処理
+        if (audioQueueRef.current.length > 0) {
+          console.log("次の音声に進みます");
+          setTimeout(() => processAudioQueue(), 50);
+        } else {
+          console.log("全ての音声再生完了");
+        }
+      },
+      onError: (err) => {
+        console.error("音声再生エラー:", audioItem.text, err);
+        setIsPlayingAudio(false);
+        isProcessingQueueRef.current = false;
+        
+        // エラーでも次の音声に進む
+        if (audioQueueRef.current.length > 0) {
+          console.log("エラー後、次の音声に進みます");
+          setTimeout(() => processAudioQueue(), 50);
+        }
+      }
+    });
+  };
+
+  // 音声をキューに追加（順序保証版）
+  const addToAudioQueue = (sentence: string) => {
+    const chunkId = chunkIdRef.current++;
+    
+    // まずキューに仮エントリを追加（順序を保証）
+    const queueItem = {
+      id: chunkId,
+      text: sentence,
+      audioUrl: null as string | null
+    };
+    audioQueueRef.current.push(queueItem);
+    console.log(`チャンクID${chunkId}をキューに追加:`, sentence);
+    
+    // 非同期で音声生成
+    (async () => {
+      try {
+        console.log(`チャンクID${chunkId}音声生成開始:`, sentence);
+        const response = await fetch("/api/generate-audio", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: sentence }),
+        });
+
+        if (!response.ok) {
+          throw new Error("音声生成に失敗しました");
+        }
+
+        const data = await response.json();
+        if (data.audioUrl) {
+          // キュー内の該当アイテムを更新
+          const item = audioQueueRef.current.find(item => item.id === chunkId);
+          if (item) {
+            item.audioUrl = data.audioUrl;
+            console.log(`チャンクID${chunkId}音声生成完了:`, sentence);
+          }
+          
+          // キュー処理を開始（最初のチャンクの場合は即座に、その他は少し遅延）
+          if (chunkId === 0) {
+            console.log("最初のチャンク完了、即座にキュー処理開始");
+            setTimeout(() => processAudioQueue(), 50);
+          } else {
+            processAudioQueue();
+          }
+        }
+      } catch (error) {
+        console.error(`チャンクID${chunkId}音声生成エラー:`, sentence, error);
+        // エラーの場合はキューから削除
+        audioQueueRef.current = audioQueueRef.current.filter(item => item.id !== chunkId);
+      }
+    })();
+  };
+
   const handleSendMessage = async () => {
     if (!inputText.trim() || isLoading) return;
 
@@ -77,6 +221,21 @@ export default function Live2D() {
     setMessages(prev => [...prev, userMessage]);
     setInputText("");
     setIsLoading(true);
+    
+    // 状態をリセット
+    console.log("新しいメッセージ開始 - 状態をリセット");
+    chunkIdRef.current = 0;
+    audioQueueRef.current = [];
+    isProcessingQueueRef.current = false;
+    setIsPlayingAudio(false);
+
+    // アシスタントメッセージの初期化
+    const assistantMessageIndex = messages.length + 1;
+    setMessages(prev => [...prev, { role: "assistant", content: "" }]);
+
+    let fullResponse = "";
+    const processedSentences: string[] = [];
+    let remainingText = "";
 
     try {
       const response = await fetch("/api/chat", {
@@ -93,22 +252,56 @@ export default function Live2D() {
         throw new Error("チャット応答の取得に失敗しました");
       }
 
-      const data = await response.json();
-      const assistantMessage: Message = { 
-        role: "assistant", 
-        content: data.message 
-      };
-      
-      setMessages(prev => [...prev, assistantMessage]);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("ストリームリーダーの取得に失敗しました");
+      }
 
-      // 応答を音声で再生
-      if (model && data.audioUrl) {
-        try {
-          await model.speak(data.audioUrl);
-        } catch (error) {
-          console.error("音声再生に失敗しました:", error);
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        fullResponse += chunk;
+        remainingText += chunk;
+
+        // リアルタイムテキスト表示の更新
+        setMessages(prev => {
+          const newMessages = [...prev];
+          newMessages[assistantMessageIndex] = {
+            role: "assistant",
+            content: fullResponse,
+          };
+          return newMessages;
+        });
+
+        // 30文字ずつで分割して音声生成
+        const splitResult = splitByCharacters(remainingText);
+        
+        // 完成したチャンクを処理
+        for (const chunk of splitResult.completed) {
+          if (!processedSentences.includes(chunk)) {
+            processedSentences.push(chunk);
+            console.log("30文字チャンクを音声生成:", chunk);
+            addToAudioQueue(chunk);
+          }
+        }
+        
+        // 残りのテキストを更新
+        remainingText = splitResult.remaining;
+      }
+
+      // 最後に残ったテキストがあれば音声生成
+      if (remainingText.trim() && remainingText.trim().length > 3) {
+        const finalText = remainingText.trim();
+        if (!processedSentences.includes(finalText)) {
+          console.log("最終チャンクを音声生成:", finalText);
+          addToAudioQueue(finalText);
         }
       }
+
     } catch (error) {
       console.error("メッセージ送信に失敗しました:", error);
       alert("メッセージの送信に失敗しました");
