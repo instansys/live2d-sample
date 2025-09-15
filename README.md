@@ -1,281 +1,117 @@
-# Live2D システムガイド
 
-## 概要
-このドキュメントは、pixi-live2d-display-lipsyncpatchを使用したLive2Dモデルの音声リップシンク、表情変更、モーション再生システムについて説明します。
+## VOICEVOX音声合成システム
 
-## 1. 基本構成
+### 概要
+このアプリケーションは、Claude AIとVOICEVOX音声合成を統合し、Live2Dキャラクターが話すチャットシステムを実装しています。
 
-### 1.1 使用ライブラリ
-- **pixi-live2d-display-lipsyncpatch**: Live2D Cubism 4モデル表示とリップシンク機能
-- **pixi.js**: 2Dレンダリングエンジン
-- **React**: UIコンポーネント管理
+### システム構成
 
-### 1.2 ファイル構造
+#### 1. チャットフロー全体
 ```
-public/live2d/Resources/Haru/
-├── Haru.model3.json        # モデル定義ファイル
-├── Haru.moc3              # モデルデータ
-├── Haru.physics3.json     # 物理演算設定
-├── expressions/           # 表情ファイル
-│   ├── F01.exp3.json
-│   ├── F02.exp3.json
-│   └── ...
-├── motions/              # モーションファイル
-│   ├── haru_g_idle.motion3.json
-│   ├── haru_g_m01.motion3.json
-│   └── ...
-└── sounds/               # 音声ファイル
-    ├── haru_Info_04.wav
-    └── ...
+ユーザー入力 → Claude API → VOICEVOX音声生成 → Live2D音声再生
 ```
 
-## 2. モーションシステム
+#### 2. フロントエンド (src/app/page.tsx)
+- **チャットUI**: テキスト入力とメッセージ履歴表示
+- **状態管理**: 
+  - `inputText`: 入力中のテキスト
+  - `messages`: チャット履歴（ユーザーとアシスタントのメッセージ）
+  - `isLoading`: 処理中状態
+- **送信処理**: `handleSendMessage()` で `/api/chat` へリクエスト
+- **音声再生**: レスポンスの `audioUrl` を `model.speak()` で再生
 
-### 2.1 モーション構造
-model3.jsonでは、モーションがグループとインデックスで管理されています：
+#### 3. バックエンド (src/app/api/chat/route.ts)
 
-```json
-{
-  "Motions": {
-    "Idle": [
-      {
-        "File": "motions/haru_g_idle.motion3.json",
-        "FadeInTime": 0.5,
-        "FadeOutTime": 0.5
-      }
-    ],
-    "TapBody": [
-      {
-        "File": "motions/haru_g_m26.motion3.json",
-        "FadeInTime": 0.5,
-        "FadeOutTime": 0.5,
-        "Sound": "sounds/haru_talk_13.wav"
-      }
-    ]
-  }
-}
-```
-
-### 2.2 モーション再生方法
+##### Claude AI応答生成
 ```typescript
-// グループ名、インデックス、優先度を指定
-model.motion(group: string, index: number, priority: number)
-
-// 例：
-model.motion("Idle", 0, 3);      // アイドルモーション
-model.motion("TapBody", 0, 3);   // タップモーション
-```
-
-### 2.3 優先度システム
-- **優先度が高い**ほど他のモーションを上書きできる
-- 推奨値：通常のモーション = 1～3, 重要なモーション = 4以上
-
-## 3. 表情システム
-
-### 3.1 表情構造
-model3.jsonでは表情が配列で定義されています：
-
-```json
-{
-  "Expressions": [
-    {
-      "Name": "F01",
-      "File": "expressions/F01.exp3.json"
-    },
-    {
-      "Name": "F02", 
-      "File": "expressions/F02.exp3.json"
-    }
-  ]
-}
-```
-
-### 3.2 表情変更方法
-```typescript
-// 表情名を指定
-model.expression(expressionName: string)
-
-// 例：
-model.expression("F01");  // 表情1に変更
-model.expression("F02");  // 表情2に変更
-```
-
-### 3.3 表情の特徴
-- モーションと**独立して動作**
-- 複数の表情を**同時適用不可**（新しい表情が前の表情を置き換える）
-- フェード効果で**スムーズに切り替わる**
-
-## 4. リップシンクシステム
-
-### 4.1 リップシンクの仕組み
-pixi-live2d-display-lipsyncpatchは以下の処理を行います：
-
-1. **音声解析**: 音声ファイルの振幅を分析
-2. **パラメータ制御**: `ParamMouthOpenY`パラメータを音声に合わせて調整
-3. **リアルタイム同期**: 音声再生と口の動きを同期
-
-### 4.2 LipSyncグループ設定
-model3.jsonでLipSyncグループが定義されています：
-
-```json
-{
-  "Groups": [
-    {
-      "Target": "Parameter",
-      "Name": "LipSync", 
-      "Ids": [
-        "ParamMouthOpenY"  // 口の開閉パラメータ
-      ]
-    }
-  ]
-}
-```
-
-### 4.3 音声再生とリップシンク
-```typescript
-// 音声URLを指定してリップシンク付き再生
-await model.speak(audioUrl: string)
-
-// 例：
-await model.speak("/live2d/Resources/Haru/sounds/haru_talk_13.wav");
-```
-
-### 4.4 従来の音声再生との違い
-```typescript
-// ❌ リップシンクなし
-const audio = new Audio(audioUrl);
-audio.play();
-
-// ✅ リップシンクあり  
-await model.speak(audioUrl);
-```
-
-## 5. 実装例
-
-### 5.1 基本的な実装パターン
-```typescript
-const Live2DComponent = () => {
-  const [model, setModel] = useState<Live2DModel | null>(null);
-
-  // モーション再生
-  const playMotion = (group: string, index: number) => {
-    if (model) {
-      model.motion(group, index, 3);
-    }
-  };
-
-  // 表情変更
-  const playExpression = (expressionName: string) => {
-    if (model) {
-      model.expression(expressionName);
-    }
-  };
-
-  // リップシンク付き音声再生
-  const playSound = async (soundFile: string) => {
-    if (model) {
-      const audioUrl = `/live2d/Resources/Haru/sounds/${soundFile}`;
-      try {
-        await model.speak(audioUrl);
-      } catch (error) {
-        console.error('音声再生エラー:', error);
-      }
-    }
-  };
-};
-```
-
-### 5.2 UIボタンとの連携
-```typescript
-// モーション定義
-const motions = [
-  { name: "アイドル", group: "Idle", index: 0 },
-  { name: "タップ", group: "TapBody", index: 0 }
-];
-
-// 表情定義
-const expressions = [
-  { name: "表情1", file: "F01" },
-  { name: "表情2", file: "F02" }
-];
-
-// 音声定義
-const sounds = [
-  { name: "挨拶", file: "haru_talk_13.wav" },
-  { name: "情報", file: "haru_Info_04.wav" }
-];
-```
-
-## 6. トラブルシューティング
-
-### 6.1 よくある問題と解決方法
-
-#### モーションが再生されない
-- **原因**: グループ名やインデックスが間違っている
-- **解決**: model3.jsonでMotionsセクションを確認
-
-#### 表情が変わらない
-- **原因**: 表情名が間違っている
-- **解決**: model3.jsonでExpressionsセクションを確認
-
-#### リップシンクが動作しない
-- **原因**: 
-  - `model.speak()`ではなく`new Audio()`を使用している
-  - 音声ファイルが見つからない
-  - LipSyncパラメータが設定されていない
-- **解決**: 
-  - `model.speak()`を使用する
-  - 音声ファイルのパスを確認
-  - model3.jsonのGroupsセクションでLipSyncグループを確認
-
-#### Cubism 4 runtimeエラー
-- **原因**: live2dcubismcore.jsが読み込まれていない
-- **解決**: Next.js Scriptコンポーネントで事前読み込み
-
-### 6.2 デバッグ方法
-```typescript
-// モデルの状態確認
-console.log('Model loaded:', !!model);
-console.log('Available motions:', model?.definitions?.motions);
-console.log('Available expressions:', model?.definitions?.expressions);
-
-// 再生状況の確認
-model.on('motionStart', (group, index) => {
-  console.log(`Motion started: ${group}[${index}]`);
-});
-
-model.on('expressionStart', (name) => {
-  console.log(`Expression started: ${name}`);
+const response = await generateText({
+  model: anthropic("claude-3-5-sonnet-20240620"),
+  messages,
 });
 ```
 
-## 7. パフォーマンス最適化
+##### VOICEVOX音声合成プロセス
+1. **音声クエリ作成** (`/audio_query`)
+   ```typescript
+   const queryResponse = await fetch(
+     `${VOICEVOX_BASE_URL}/audio_query?speaker=${SPEAKER_ID}&text=${encodeURIComponent(text)}`
+   );
+   ```
+   - `SPEAKER_ID = 1` (ずんだもん)
+   - テキストをURLエンコードして送信
 
-### 7.1 推奨事項
-- **事前読み込み**: よく使用する音声ファイルは事前にキャッシュ
-- **優先度管理**: 重要でないモーションは低優先度で再生
-- **メモリ管理**: 不要なモデルは適切に破棄
+2. **音声合成実行** (`/synthesis`)
+   ```typescript
+   const synthesisResponse = await fetch(
+     `${VOICEVOX_BASE_URL}/synthesis?speaker=${SPEAKER_ID}`,
+     {
+       method: "POST",
+       body: JSON.stringify(queryData),
+     }
+   );
+   ```
+   - 前ステップのクエリデータを使用して音声生成
 
-### 7.2 実装例
-```typescript
-// 音声ファイルの事前読み込み
-const preloadAudio = async (audioUrls: string[]) => {
-  const promises = audioUrls.map(url => {
-    return new Promise((resolve) => {
-      const audio = new Audio(url);
-      audio.addEventListener('canplaythrough', resolve);
-      audio.load();
-    });
-  });
-  await Promise.all(promises);
-};
+3. **Base64データURL変換**
+   ```typescript
+   const audioBuffer = await synthesisResponse.arrayBuffer();
+   const audioBase64 = Buffer.from(audioBuffer).toString('base64');
+   return `data:audio/wav;base64,${audioBase64}`;
+   ```
+
+#### 4. Live2D音声再生統合
+- **リップシンク**: `model.speak(audioUrl)` でVOICEVOX生成音声を再生
+- **自動同期**: 口の動きが音声に自動的に同期
+- **エラーハンドリング**: 音声生成失敗時もテキストは表示
+
+### 環境要件
+
+#### VOICEVOX サーバー
+- **必須**: `localhost:50021` でVOICEVOXエンジンが起動中
+- **話者**: ID=1（ずんだもん）を使用
+- **API**: `/audio_query` と `/synthesis` エンドポイントが利用可能
+
+#### 環境変数
+```
+ANTHROPIC_API_KEY=your_anthropic_api_key
 ```
 
-## 8. まとめ
+### 使用方法
 
-Live2Dシステムの各要素：
-- **モーション**: グループとインデックスで管理、優先度制御可能
-- **表情**: 名前で管理、独立して動作
-- **リップシンク**: `model.speak()`で音声と口の動きを自動同期
+#### 開発環境セットアップ
+1. VOICEVOXアプリケーションを起動
+2. `npm run dev` でNext.jsサーバー起動
+3. チャット入力欄にメッセージ入力
+4. Live2DキャラクターがClaude応答をずんだもんの声で発話
 
-これらの機能を組み合わせることで、豊かな表現力を持つLive2Dキャラクターを実現できます。
+#### トラブルシューティング
+
+##### VOICEVOX接続エラー
+- VOICEVOXアプリケーションが起動しているか確認
+- `localhost:50021` でアクセス可能か確認
+- ファイアウォール設定を確認
+
+##### 音声が再生されない
+- ブラウザの自動再生ポリシーを確認
+- `model.speak()` のエラーログを確認
+- Base64データURLの形式を確認
+
+##### Claude API エラー
+- `ANTHROPIC_API_KEY` の設定を確認
+- API制限に達していないか確認
+
+### 技術仕様
+
+#### API レスポンス形式
+```json
+{
+  "message": "Claude AIの応答テキスト",
+  "audioUrl": "data:audio/wav;base64,..." 
+}
+```
+
+#### 音声品質
+- **フォーマット**: WAV
+- **話者**: ずんだもん（ID=1）
+- **エンコード**: Base64データURL
+- **配信**: インライン（ストリーミングなし）
