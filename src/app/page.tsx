@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Live2DModel } from "pixi-live2d-display-lipsyncpatch/cubism4";
 
 const setModelPosition = (app: Application, model: Live2DModel) => {
-  const scale = (app.renderer.width * 0.4) / model.width;
+  const scale = (app.renderer.width * 1.6) / model.width;
   model.scale.set(scale);
   model.x = app.renderer.width / 2;
   model.y = app.renderer.height - model.height * scale * 0.3;
@@ -74,33 +74,32 @@ export default function Live2D() {
     }
   };
 
-  // 30文字ずつで分割する関数
-  const splitByCharacters = (text: string): { completed: string[], remaining: string } => {
+  const splitByPunctuation = (text: string): { completed: string[], remaining: string } => {
     const completed: string[] = [];
     let currentText = text;
     
-    // 30文字以上ある間は分割を続ける
-    while (currentText.length >= 30) {
-      // 30文字で切り取る
-      let chunk = currentText.substring(0, 30);
+    const punctuationMarks = ['。', '、', '.', ',', '!', '?', '！', '？'];
+    
+    while (currentText.length > 0) {
+      let foundPunctuation = false;
       
-      // より自然な区切り位置を探す（句読点、スペース等）
-      const naturalBreaks = [20, 25, 30]; // 後ろから優先的に探す
-      let bestBreakPoint = 30;
-      
-      for (const pos of naturalBreaks.reverse()) {
-        if (pos < currentText.length) {
-          const char = currentText[pos];
-          if (char === '。' || char === '、' || char === ' ' || char === '\n') {
-            bestBreakPoint = pos + 1;
-            break;
+      for (let i = 0; i < currentText.length; i++) {
+        const char = currentText[i];
+        if (punctuationMarks.includes(char)) {
+          const chunk = currentText.substring(0, i + 1).trim();
+          if (chunk.length > 0) {
+            completed.push(chunk);
           }
+          currentText = currentText.substring(i + 1).trim();
+          foundPunctuation = true;
+          break;
         }
       }
       
-      chunk = currentText.substring(0, bestBreakPoint);
-      completed.push(chunk.trim());
-      currentText = currentText.substring(bestBreakPoint).trim();
+      // 句読点が見つからなかった場合、全て残りテキストとして扱う
+      if (!foundPunctuation) {
+        break;
+      }
     }
     
     return { completed, remaining: currentText };
@@ -108,19 +107,15 @@ export default function Live2D() {
 
   // onFinish付きの順序保証音声キュー処理
   const processAudioQueue = () => {
-    console.log("processAudioQueue呼び出し - 処理中:", isProcessingQueueRef.current, "キュー長:", audioQueueRef.current.length);
-    
     if (isProcessingQueueRef.current || !model || audioQueueRef.current.length === 0) {
       return;
     }
 
     // 最初の要素が音声生成完了しているかチェック
     const firstItem = audioQueueRef.current[0];
-    console.log("最初の要素チェック:", firstItem?.text, "音声URL存在:", !!firstItem?.audioUrl);
     
     if (!firstItem || firstItem.audioUrl === null) {
       // まだ音声生成中なので少し待ってから再試行
-      console.log("音声生成中のため100ms待機");
       setTimeout(() => processAudioQueue(), 100);
       return;
     }
@@ -129,21 +124,16 @@ export default function Live2D() {
     setIsPlayingAudio(true);
     
     const audioItem = audioQueueRef.current.shift()!;
-    console.log("音声再生開始:", audioItem.text);
 
     // onFinishコールバックを使って次の音声再生を制御
     model.speak(audioItem.audioUrl!, {
       onFinish: () => {
-        console.log("音声再生完了:", audioItem.text);
         setIsPlayingAudio(false);
         isProcessingQueueRef.current = false;
         
         // 次の音声があれば継続処理
         if (audioQueueRef.current.length > 0) {
-          console.log("次の音声に進みます");
           setTimeout(() => processAudioQueue(), 50);
-        } else {
-          console.log("全ての音声再生完了");
         }
       },
       onError: (err) => {
@@ -153,7 +143,6 @@ export default function Live2D() {
         
         // エラーでも次の音声に進む
         if (audioQueueRef.current.length > 0) {
-          console.log("エラー後、次の音声に進みます");
           setTimeout(() => processAudioQueue(), 50);
         }
       }
@@ -171,12 +160,10 @@ export default function Live2D() {
       audioUrl: null as string | null
     };
     audioQueueRef.current.push(queueItem);
-    console.log(`チャンクID${chunkId}をキューに追加:`, sentence);
     
     // 非同期で音声生成
     (async () => {
       try {
-        console.log(`チャンクID${chunkId}音声生成開始:`, sentence);
         const response = await fetch("/api/generate-audio", {
           method: "POST",
           headers: {
@@ -195,19 +182,17 @@ export default function Live2D() {
           const item = audioQueueRef.current.find(item => item.id === chunkId);
           if (item) {
             item.audioUrl = data.audioUrl;
-            console.log(`チャンクID${chunkId}音声生成完了:`, sentence);
           }
           
           // キュー処理を開始（最初のチャンクの場合は即座に、その他は少し遅延）
           if (chunkId === 0) {
-            console.log("最初のチャンク完了、即座にキュー処理開始");
             setTimeout(() => processAudioQueue(), 50);
           } else {
             processAudioQueue();
           }
         }
       } catch (error) {
-        console.error(`チャンクID${chunkId}音声生成エラー:`, sentence, error);
+        console.error("音声生成エラー:", error);
         // エラーの場合はキューから削除
         audioQueueRef.current = audioQueueRef.current.filter(item => item.id !== chunkId);
       }
@@ -223,7 +208,6 @@ export default function Live2D() {
     setIsLoading(true);
     
     // 状態をリセット
-    console.log("新しいメッセージ開始 - 状態をリセット");
     chunkIdRef.current = 0;
     audioQueueRef.current = [];
     isProcessingQueueRef.current = false;
@@ -277,14 +261,13 @@ export default function Live2D() {
           return newMessages;
         });
 
-        // 30文字ずつで分割して音声生成
-        const splitResult = splitByCharacters(remainingText);
+        // 句読点で分割して音声生成
+        const splitResult = splitByPunctuation(remainingText);
         
         // 完成したチャンクを処理
         for (const chunk of splitResult.completed) {
           if (!processedSentences.includes(chunk)) {
             processedSentences.push(chunk);
-            console.log("30文字チャンクを音声生成:", chunk);
             addToAudioQueue(chunk);
           }
         }
@@ -297,7 +280,6 @@ export default function Live2D() {
       if (remainingText.trim() && remainingText.trim().length > 3) {
         const finalText = remainingText.trim();
         if (!processedSentences.includes(finalText)) {
-          console.log("最終チャンクを音声生成:", finalText);
           addToAudioQueue(finalText);
         }
       }

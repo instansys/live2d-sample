@@ -6,6 +6,7 @@ const SPEAKER_ID = 1; // ずんだもん
 export async function POST(request: Request) {
   try {
     const { text } = await request.json();
+    console.log("音声生成開始:", text);
 
     if (!text || typeof text !== 'string') {
       return NextResponse.json(
@@ -59,6 +60,7 @@ export async function POST(request: Request) {
     const audioBuffer = await synthesisResponse.arrayBuffer();
     const audioBase64 = Buffer.from(audioBuffer).toString('base64');
     
+    console.log("音声生成完了:", text);
     return NextResponse.json({
       audioUrl: `data:audio/wav;base64,${audioBase64}`,
     });

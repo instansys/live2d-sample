@@ -5,13 +5,27 @@ import 'dotenv/config';
 export async function POST(request: Request) {
   try {
     const { messages } = await request.json();
+    console.log("チャット開始:", messages[messages.length - 1]?.content?.substring(0, 50) + "...");
 
     const result = await streamText({
       model: anthropic("claude-3-5-sonnet-20240620"),
       messages,
     });
 
-    return result.toTextStreamResponse();
+    // ストリームを変換してログ出力
+    const transformStream = new TransformStream({
+      transform(chunk, controller) {
+        const text = new TextDecoder().decode(chunk);
+        console.log("ストリーミング受信:", text);
+        controller.enqueue(chunk);
+      }
+    });
+
+    const response = result.toTextStreamResponse();
+    return new Response(response.body?.pipeThrough(transformStream), {
+      headers: response.headers,
+      status: response.status
+    });
   } catch (error) {
     console.error("ストリーミングチャット処理エラー:", error);
     return new Response(
