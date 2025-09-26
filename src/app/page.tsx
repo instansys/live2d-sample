@@ -72,28 +72,59 @@ export default function Live2D() {
 
   // 転写テキストの処理
   const handleRealtimeTranscript = (transcript: string) => {
-    // 会話履歴に追加
-    setConversationHistory((prev) => [
-      ...prev,
-      {
-        type: "user",
-        content: transcript,
-        timestamp: new Date(),
-      },
-    ]);
+    // 重複を避けるため、最新のメッセージが同じでない場合のみ追加
+    setConversationHistory((prev) => {
+      const lastMessage = prev[prev.length - 1];
+      if (
+        lastMessage &&
+        lastMessage.type === "user" &&
+        lastMessage.content === transcript
+      ) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          type: "user",
+          content: transcript,
+          timestamp: new Date(),
+        },
+      ];
+    });
   };
 
   // レスポンステキストの処理
   const handleRealtimeResponse = (response: string) => {
-    // 会話履歴に追加
-    setConversationHistory((prev) => [
-      ...prev,
-      {
-        type: "assistant",
-        content: response,
-        timestamp: new Date(),
-      },
-    ]);
+    // 重複を避けるため、最新のメッセージが同じでない場合のみ追加
+    setConversationHistory((prev) => {
+      const lastMessage = prev[prev.length - 1];
+      if (
+        lastMessage &&
+        lastMessage.type === "assistant" &&
+        lastMessage.content === response
+      ) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          type: "assistant",
+          content: response,
+          timestamp: new Date(),
+        },
+      ];
+    });
+  };
+
+  // 履歴更新の処理
+  const handleHistoryUpdate = (
+    history: Array<{
+      type: "user" | "assistant";
+      content: string;
+      timestamp: Date;
+    }>
+  ) => {
+    setConversationHistory(history);
   };
 
   const initApp = () => {
@@ -175,6 +206,7 @@ export default function Live2D() {
             onTranscript={handleRealtimeTranscript}
             onResponse={handleRealtimeResponse}
             conversationHistory={conversationHistory}
+            onHistoryUpdate={handleHistoryUpdate}
           />
 
           <div>
