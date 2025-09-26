@@ -46,7 +46,6 @@ export default function Live2D() {
   const [inputText, setInputText] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const audioQueueRef = useRef<{ text: string; audioUrl: string | null; id: number }[]>([]);
   const chunkIdRef = useRef<number>(0);
   const isProcessingQueueRef = useRef<boolean>(false);
@@ -121,14 +120,12 @@ export default function Live2D() {
     }
 
     isProcessingQueueRef.current = true;
-    setIsPlayingAudio(true);
     
     const audioItem = audioQueueRef.current.shift()!;
 
     // onFinishコールバックを使って次の音声再生を制御
     model.speak(audioItem.audioUrl!, {
       onFinish: () => {
-        setIsPlayingAudio(false);
         isProcessingQueueRef.current = false;
         
         // 次の音声があれば継続処理
@@ -138,7 +135,6 @@ export default function Live2D() {
       },
       onError: (err) => {
         console.error("音声再生エラー:", audioItem.text, err);
-        setIsPlayingAudio(false);
         isProcessingQueueRef.current = false;
         
         // エラーでも次の音声に進む
@@ -211,7 +207,6 @@ export default function Live2D() {
     chunkIdRef.current = 0;
     audioQueueRef.current = [];
     isProcessingQueueRef.current = false;
-    setIsPlayingAudio(false);
 
     // アシスタントメッセージの初期化
     const assistantMessageIndex = messages.length + 1;
