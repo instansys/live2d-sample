@@ -1,6 +1,7 @@
 "use client";
 import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
+import type { Live2DModel } from 'pixi-live2d-display-lipsyncpatch/cubism4';
 
 interface RealtimeChatProps {
   onTranscript?: (transcript: string) => void;
@@ -17,6 +18,7 @@ interface RealtimeChatProps {
       timestamp: Date;
     }>
   ) => void;
+  live2dModel?: Live2DModel | null;
 }
 
 export default function RealtimeChat({
@@ -24,6 +26,7 @@ export default function RealtimeChat({
   onResponse,
   conversationHistory = [],
   onHistoryUpdate,
+  live2dModel,
 }: RealtimeChatProps) {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -33,6 +36,43 @@ export default function RealtimeChat({
   const [textInput, setTextInput] = useState<string>("");
   const [isSending, setIsSending] = useState(false);
   const sessionRef = useRef<RealtimeSession | null>(null);
+  const lipsyncRef = useRef<{ 
+    dispose: () => void; 
+    resume: () => Promise<void>;
+    triggerSpeaking?: (delay?: number) => void;
+  } | null>(null);
+  
+  // タイミング調査用の状態
+  const [audioTimestamps, setAudioTimestamps] = useState<{
+    textReceived: number;
+    audioStarted: number;
+    estimatedDelay: number;
+  }>({ textReceived: 0, audioStarted: 0, estimatedDelay: 500 }); // デフォルト500ms遅延
+
+  // Live2Dモデルが用意できたらリップシンクを設定
+  useEffect(() => {
+    if (live2dModel && sessionRef.current && isConnected && !lipsyncRef.current) {
+      const setupLipsync = async () => {
+        try {
+          console.log('Setting up lipsync with Live2D model');
+          const { setupRealtimeLipsync } = await import("@/lib/lipsync");
+          const lipsync = setupRealtimeLipsync(live2dModel, sessionRef.current);
+          lipsyncRef.current = lipsync;
+          
+          // ユーザー操作でaudio resumeを試行
+          lipsync.resume().catch((e) => {
+            console.warn('Initial lipsync resume failed:', e);
+            setError('音声再生の準備ができませんでした。ページをクリックしてください');
+          });
+        } catch (e) {
+          console.error('Failed to setup lipsync:', e);
+          setError(`リップシンク設定に失敗しました: ${e instanceof Error ? e.message : '不明なエラー'}`);
+        }
+      };
+      
+      setupLipsync();
+    }
+  }, [live2dModel, isConnected]);
 
   const connect = async () => {
     setIsConnecting(true);
@@ -62,30 +102,51 @@ export default function RealtimeChat({
       sessionRef.current = session;
 
       // イベントリスナーを設定
-      session.on("conversation.item.input", (event: any) => {
+      session.on("conversation.item.input", (event: { 
+        type?: string; 
+        message?: { 
+          content: Array<{ type: string; text?: string }>
+        } 
+      }) => {
         console.log("Input event:", event);
         if (event.type === "message" && event.message) {
           const userMessage = event.message.content[0];
           if (userMessage.type === "input_text") {
             const userText = userMessage.text;
             console.log("User text:", userText);
-            setTranscript(userText);
-            if (onTranscript) {
+            setTranscript(userText || "");
+            if (onTranscript && userText) {
               onTranscript(userText);
             }
           }
         }
       });
 
-      session.on("conversation.item.output", (event: any) => {
+      session.on("conversation.item.output", (event: {
+        type?: string;
+        message?: {
+          content: Array<{ type: string; text?: string }>
+        }
+      }) => {
         console.log("Output event:", event);
         if (event.type === "message" && event.message) {
           const assistantMessage = event.message.content[0];
           if (assistantMessage.type === "output_text") {
             const assistantText = assistantMessage.text;
             console.log("Assistant text:", assistantText);
-            setResponse(assistantText);
-            if (onResponse) {
+            setResponse(assistantText || "");
+            
+            // リップシンクをトリガー（遅延補正付き）
+            if (lipsyncRef.current?.triggerSpeaking && assistantText) {
+              const currentTime = Date.now();
+              setAudioTimestamps(prev => ({ ...prev, textReceived: currentTime }));
+              
+              // 推定遅延でリップシンクを遅らせる
+              console.log('[TIMING] Text response received, triggering lipsync with delay:', audioTimestamps.estimatedDelay);
+              lipsyncRef.current.triggerSpeaking(audioTimestamps.estimatedDelay);
+            }
+            
+            if (onResponse && assistantText) {
               onResponse(assistantText);
             }
           }
@@ -93,11 +154,24 @@ export default function RealtimeChat({
       });
 
       // output_audioイベントを追加
-      session.on("conversation.item.output", (event: any) => {
+      session.on("conversation.item.output", (event: {
+        type?: string;
+        transcript?: string;
+      }) => {
         console.log("Output event:", event);
         if (event.type === "output_audio" && event.transcript) {
           console.log("Assistant transcript:", event.transcript);
           setResponse(event.transcript);
+          
+          // リップシンクをトリガー（音声レスポンス、遅延補正付き）
+          if (lipsyncRef.current?.triggerSpeaking) {
+            const currentTime = Date.now();
+            setAudioTimestamps(prev => ({ ...prev, textReceived: currentTime }));
+            
+            console.log('[TIMING] Audio response received, triggering lipsync with delay:', audioTimestamps.estimatedDelay);
+            lipsyncRef.current.triggerSpeaking(audioTimestamps.estimatedDelay);
+          }
+          
           if (onResponse) {
             onResponse(event.transcript);
           }
@@ -105,14 +179,24 @@ export default function RealtimeChat({
       });
 
       // 追加のイベントリスナー
-      session.on("response.audio.delta", (event: any) => {
+      session.on("response.audio.delta", (event: { delta?: unknown }) => {
         console.log("Audio delta event:", event);
       });
 
-      session.on("response.text.delta", (event: any) => {
+      session.on("response.text.delta", (event: { delta?: string }) => {
         console.log("Text delta event:", event);
         if (event.delta) {
           setResponse((prev) => prev + event.delta);
+          
+          // リップシンクをトリガー（ストリーミングテキスト、遅延補正付き）
+          if (lipsyncRef.current?.triggerSpeaking) {
+            const currentTime = Date.now();
+            setAudioTimestamps(prev => ({ ...prev, textReceived: currentTime }));
+            
+            console.log('[TIMING] Streaming text received, triggering lipsync with delay:', audioTimestamps.estimatedDelay);
+            lipsyncRef.current.triggerSpeaking(audioTimestamps.estimatedDelay);
+          }
+          
           if (onResponse) {
             onResponse(event.delta);
           }
@@ -120,15 +204,21 @@ export default function RealtimeChat({
       });
 
       // 会話履歴の更新を監視
-      session.on("history_updated", (history: any) => {
+      session.on("history_updated", (history: Array<{
+        type?: string;
+        role?: string;
+        content?: unknown;
+        transcript?: string;
+        created_at?: number;
+      }>) => {
         console.log("History updated:", history);
         // 履歴をローカル状態に変換
         const formattedHistory = history
           .filter(
-            (item: any) =>
+            (item) =>
               item.type === "message" || item.type === "output_audio"
           )
-          .map((item: any) => {
+          .map((item) => {
             console.log("Processing item:", item);
             // contentの処理を改善
             let content = "";
@@ -137,12 +227,29 @@ export default function RealtimeChat({
               content = item.transcript || "";
               console.log("output_audio content:", content);
             } else if (Array.isArray(item.content)) {
-              content = item.content[0]?.text || item.content[0] || "";
+              const contentArray = item.content as Array<{ 
+                type?: string; 
+                text?: string; 
+                transcript?: string; 
+                audio?: unknown; 
+              }>;
+              // contentの最初の要素からテキストを抽出
+              const firstContent = contentArray[0];
+              if (firstContent) {
+                content = firstContent.text || firstContent.transcript || "";
+                console.log('Extracted content from array:', content, 'from:', firstContent);
+              }
             } else if (typeof item.content === "string") {
               content = item.content;
             } else if (item.content && typeof item.content === "object") {
               // transcriptフィールドを優先的に取得
-              content = item.content.transcript || item.content.text || "";
+              const contentObj = item.content as { 
+                transcript?: string; 
+                text?: string; 
+                type?: string;
+              };
+              content = contentObj.transcript || contentObj.text || JSON.stringify(contentObj);
+              console.log('Extracted content from object:', content, 'from:', contentObj);
             }
 
             const result = {
@@ -165,13 +272,21 @@ export default function RealtimeChat({
           if (lastMessage.type === "user" && onTranscript) {
             onTranscript(lastMessage.content);
           } else if (lastMessage.type === "assistant" && onResponse) {
+            // アシスタントメッセージでリップシンクをトリガー（遅延補正付き）
+            if (lipsyncRef.current?.triggerSpeaking && lastMessage.content) {
+              const currentTime = Date.now();
+              setAudioTimestamps(prev => ({ ...prev, textReceived: currentTime }));
+              
+              console.log('[TIMING] History update with assistant message, triggering lipsync with delay:', audioTimestamps.estimatedDelay);
+              lipsyncRef.current.triggerSpeaking(audioTimestamps.estimatedDelay);
+            }
             onResponse(lastMessage.content);
           }
         }
       });
 
       // すべてのイベントをログに出力
-      session.on("*", (event: any) => {
+      session.on("*", (event: unknown) => {
         console.log("All events:", event);
       });
 
@@ -181,6 +296,15 @@ export default function RealtimeChat({
 
       setIsConnected(true);
       console.log("Realtime APIに接続しました！");
+      
+      // リップシンクが既に設定されていればresumeを試行
+      if (lipsyncRef.current) {
+        try {
+          await lipsyncRef.current.resume();
+        } catch (e) {
+          console.warn('Lipsync resume failed after connection:', e);
+        }
+      }
     } catch (e) {
       console.error("接続エラー:", e);
       setError(
@@ -192,6 +316,17 @@ export default function RealtimeChat({
   };
 
   const disconnect = async () => {
+    // リップシンクのクリーンアップ
+    if (lipsyncRef.current) {
+      try {
+        lipsyncRef.current.dispose();
+        lipsyncRef.current = null;
+        console.log("Lipsync disposed");
+      } catch (e) {
+        console.error("Lipsync dispose error:", e);
+      }
+    }
+
     if (sessionRef.current) {
       try {
         // RealtimeSessionの正しい切断方法を使用
@@ -208,23 +343,56 @@ export default function RealtimeChat({
   };
 
   const sendTextMessage = async () => {
-    if (!textInput.trim() || !isConnected || isSending) return;
+    if (!textInput.trim() || !isConnected || isSending || !sessionRef.current) return;
 
     setIsSending(true);
     try {
-      // テキストメッセージをRealtime APIに送信
-      await (sessionRef.current as any).sendMessage({
-        type: "message",
-        message: {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: textInput,
+      console.log("Sending text message:", textInput);
+      console.log("Session object:", sessionRef.current);
+      console.log("Session methods:", Object.getOwnPropertyNames(sessionRef.current));
+      
+      const session = sessionRef.current;
+      
+      // RealtimeSessionのメソッドを確認
+      try {
+        if (session && typeof session.sendMessage === 'function') {
+          console.log("Using sendMessage method");
+          await session.sendMessage({
+            type: "message",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: textInput,
+                },
+              ],
             },
-          ],
-        },
-      });
+          });
+        } else if (session && typeof (session as any).send === 'function') {
+          console.log("Using send method");
+          // 代替メソッド
+          await (session as any).send({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: textInput,
+                },
+              ],
+            },
+          });
+        } else {
+          console.error("Available methods:", session ? Object.getOwnPropertyNames(Object.getPrototypeOf(session)) : "null");
+          throw new Error("送信メソッドが見つかりません");
+        }
+      } catch (methodError) {
+        console.error("Method execution error:", methodError);
+        throw methodError;
+      }
 
       // ローカル状態を更新
       setTranscript(textInput);
@@ -299,6 +467,40 @@ export default function RealtimeChat({
           >
             音声会話を停止
           </button>
+
+          {/* 遅延調整デバッグUI */}
+          <div className="space-y-2 mt-4 p-3 bg-gray-50 rounded border">
+            <h5 className="text-xs font-medium text-gray-700">リップシンク遅延調整</h5>
+            <div className="flex items-center space-x-2">
+              <span className="text-xs text-gray-600">遅延:</span>
+              <input
+                type="range"
+                min="0"
+                max="2000"
+                step="100"
+                value={audioTimestamps.estimatedDelay}
+                onChange={(e) => setAudioTimestamps(prev => ({
+                  ...prev,
+                  estimatedDelay: parseInt(e.target.value)
+                }))}
+                className="flex-1"
+              />
+              <span className="text-xs text-gray-600 w-12">
+                {audioTimestamps.estimatedDelay}ms
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                if (lipsyncRef.current?.triggerSpeaking) {
+                  console.log('[TIMING] Manual test with current delay:', audioTimestamps.estimatedDelay);
+                  lipsyncRef.current.triggerSpeaking(audioTimestamps.estimatedDelay);
+                }
+              }}
+              className="w-full px-2 py-1 bg-gray-400 text-white rounded text-xs hover:bg-gray-500"
+            >
+              テスト実行
+            </button>
+          </div>
         </div>
       )}
 

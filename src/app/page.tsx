@@ -8,7 +8,7 @@ const setModelPosition = (app: Application, model: Live2DModel) => {
   const scale = (app.renderer.width * 1.6) / model.width;
   model.scale.set(scale);
   model.x = app.renderer.width / 2;
-  model.y = app.renderer.height - model.height * scale * 0.3;
+  model.y = app.renderer.height - model.height * scale * 0.1;
 };
 
 const motions = [
@@ -207,6 +207,7 @@ export default function Live2D() {
             onResponse={handleRealtimeResponse}
             conversationHistory={conversationHistory}
             onHistoryUpdate={handleHistoryUpdate}
+            live2dModel={model}
           />
 
           <div>
