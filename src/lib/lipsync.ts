@@ -130,7 +130,904 @@ export function wireLipsyncFromAudioElement(model: Live2DModel, audioEl: HTMLAud
 }
 
 /**
- * テキストレスポンスタイミングでのシンプルリップシンク
+ * ブラウザの実際の音声出力を監視してリップシンクを行う
+ */
+export function setupAudioBasedLipsync(model: Live2DModel, session?: unknown) {
+  try {
+    console.log('[LIPSYNC] Setting up audio-based lipsync...');
+    
+    const mm = model.internalModel.motionManager as {
+      currentAudio?: HTMLAudioElement;
+      currentContext?: AudioContext;
+      currentAnalyzer?: AnalyserNode;
+    };
+    model.internalModel.lipSync = true;
+
+    // ダミーのオーディオ要素
+    const dummyAudio = document.createElement('audio');
+    dummyAudio.muted = true;
+
+    const audioCtx = new AudioContext();
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.minDecibels = -90;
+    analyser.maxDecibels = -10;
+    analyser.smoothingTimeConstant = 0.85;
+    
+    mm.currentAudio = dummyAudio;
+    mm.currentContext = audioCtx;
+    mm.currentAnalyzer = analyser;
+
+    let animationId: number | null = null;
+    let isMonitoring = false;
+    
+    // システムの音声出力をキャプチャする関数
+    const setupAudioCapture = async () => {
+      try {
+        console.log('[LIPSYNC] Attempting system audio capture...');
+        
+        // 方法1: getDisplayMedia で画面キャプチャ（音声付き）を試行
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: false,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            sampleRate: 44100
+          }
+        });
+
+        console.log('[LIPSYNC] System audio capture started via getDisplayMedia');
+        
+        const source = audioCtx.createMediaStreamSource(stream);
+        source.connect(analyser);
+        // destination には接続しない（再生はしない、解析のみ）
+        
+        return {
+          stream,
+          source,
+          dispose: () => {
+            source.disconnect();
+            stream.getTracks().forEach(track => track.stop());
+          }
+        };
+      } catch (e) {
+        console.warn('[LIPSYNC] getDisplayMedia failed:', e);
+        
+        // 方法2: ユーザーメディア（マイク）経由でテスト
+        try {
+          console.log('[LIPSYNC] Attempting microphone access for testing...');
+          const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false
+            }
+          });
+          
+          console.log('[LIPSYNC] Microphone access successful (for testing)');
+          
+          const source = audioCtx.createMediaStreamSource(micStream);
+          source.connect(analyser);
+          
+          // 注意：これはマイクからの音声なので、実際の出力音声ではない
+          // デバッグ用として一時的に使用
+          
+          return {
+            stream: micStream,
+            source,
+            dispose: () => {
+              source.disconnect();
+              micStream.getTracks().forEach(track => track.stop());
+            }
+          };
+        } catch (micError) {
+          console.warn('[LIPSYNC] Microphone access also failed:', micError);
+          return null;
+        }
+      }
+    };
+
+    // ページ内のaudio要素を監視する方法（動的生成対応・改善版）
+    const setupPageAudioMonitoring = () => {
+      const audioElements = document.querySelectorAll('audio');
+      console.log('[LIPSYNC] Found audio elements:', audioElements.length);
+      
+      // 既存のaudio要素を詳しくチェック
+      for (const audioEl of audioElements) {
+        try {
+          if (audioEl instanceof HTMLAudioElement) {
+            console.log('[LIPSYNC] Audio element details:', {
+              src: audioEl.src || 'no src',
+              srcObject: audioEl.srcObject ? 'has srcObject' : 'no srcObject',
+              readyState: audioEl.readyState,
+              paused: audioEl.paused,
+              muted: audioEl.muted,
+              volume: audioEl.volume,
+              id: audioEl.id || 'no id',
+              className: audioEl.className || 'no class'
+            });
+            
+            // srcObjectがあるaudio要素（WebRTC音声など）を優先
+            if (audioEl.srcObject || audioEl.src || !audioEl.paused) {
+              const source = audioCtx.createMediaElementSource(audioEl);
+              source.connect(analyser);
+              source.connect(audioCtx.destination); // 音声も出力
+              
+              console.log('[LIPSYNC] Connected to page audio element');
+              return {
+                element: audioEl,
+                source,
+                dispose: () => {
+                  try {
+                    source.disconnect();
+                  } catch (e) {
+                    console.warn('Failed to disconnect audio source:', e);
+                  }
+                }
+              };
+            }
+          }
+        } catch (e) {
+          console.warn('[LIPSYNC] Failed to connect to audio element:', e);
+          // 次の要素を試す
+          continue;
+        }
+      }
+      
+      let connectedSource: MediaElementAudioSourceNode | null = null;
+      let connectedElement: HTMLAudioElement | null = null;
+      
+      // MutationObserverで新しいaudio要素を監視（強化版）
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          mutation.addedNodes.forEach((node) => {
+            // 直接のaudio要素
+            if (node instanceof HTMLAudioElement) {
+              console.log('[LIPSYNC] New audio element detected:', {
+                src: node.src || 'no src',
+                srcObject: node.srcObject ? 'has srcObject' : 'no srcObject',
+                autoplay: node.autoplay,
+                muted: node.muted,
+                volume: node.volume,
+                id: node.id || 'no id',
+                className: node.className || 'no class',
+                style: node.style.cssText || 'no inline style'
+              });
+              
+              // 既に接続済みでない場合のみ接続
+              if (!connectedSource) {
+                try {
+                  const source = audioCtx.createMediaElementSource(node);
+                  source.connect(analyser);
+                  source.connect(audioCtx.destination);
+                  
+                  connectedSource = source;
+                  connectedElement = node;
+                  
+                  console.log('[LIPSYNC] Connected to dynamically created audio element');
+                  
+                  // audio要素のイベントも監視
+                  const onPlay = () => {
+                    console.log('[LIPSYNC] Audio element started playing');
+                    isMonitoring = true;
+                    if (animationId === null) {
+                      animationId = requestAnimationFrame(analyzeAudio);
+                    }
+                  };
+                  
+                  const onLoadStart = () => {
+                    console.log('[LIPSYNC] Audio element load started');
+                  };
+                  
+                  const onCanPlay = () => {
+                    console.log('[LIPSYNC] Audio element can play');
+                  };
+                  
+                  const onPause = () => {
+                    console.log('[LIPSYNC] Audio element paused');
+                  };
+                  
+                  const onVolumeChange = () => {
+                    console.log('[LIPSYNC] Audio element volume changed:', node.volume, node.muted);
+                  };
+                  
+                  node.addEventListener('play', onPlay);
+                  node.addEventListener('pause', onPause);
+                  node.addEventListener('ended', onPause);
+                  node.addEventListener('loadstart', onLoadStart);
+                  node.addEventListener('canplay', onCanPlay);
+                  node.addEventListener('volumechange', onVolumeChange);
+                  
+                } catch (e) {
+                  console.warn('[LIPSYNC] Failed to connect to dynamic audio element:', e);
+                }
+              }
+            }
+            
+            // 子要素にaudio要素がある場合もチェック
+            if (node instanceof Element) {
+              const childAudioElements = node.querySelectorAll('audio');
+              if (childAudioElements.length > 0) {
+                console.log('[LIPSYNC] Found audio elements in added node:', childAudioElements.length);
+                
+                childAudioElements.forEach((childAudio) => {
+                  if (childAudio instanceof HTMLAudioElement && !connectedSource) {
+                    console.log('[LIPSYNC] Attempting to connect to child audio element');
+                    try {
+                      const source = audioCtx.createMediaElementSource(childAudio);
+                      source.connect(analyser);
+                      source.connect(audioCtx.destination);
+                      
+                      connectedSource = source;
+                      connectedElement = childAudio;
+                      
+                      console.log('[LIPSYNC] Connected to child audio element');
+                    } catch (e) {
+                      console.warn('[LIPSYNC] Failed to connect to child audio element:', e);
+                    }
+                  }
+                });
+              }
+            }
+          });
+        });
+      });
+      
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true, // src属性の変更も監視
+        attributeFilter: ['src', 'srcobject']
+      });
+      
+      console.log('[LIPSYNC] Started enhanced MutationObserver for audio elements');
+      
+      return {
+        observer,
+        dispose: () => {
+          observer.disconnect();
+          if (connectedSource) {
+            try {
+              connectedSource.disconnect();
+            } catch (e) {
+              console.warn('Failed to disconnect MutationObserver audio source:', e);
+            }
+          }
+          console.log('[LIPSYNC] Audio element observer disposed');
+        }
+      };
+    };
+
+    // リアルタイム音声解析とリップシンク
+    const analyzeAudio = () => {
+      if (!isMonitoring || !analyser) {
+        if (animationId !== null) {
+          animationId = requestAnimationFrame(analyzeAudio);
+        }
+        return;
+      }
+
+      try {
+        // ライブラリと同じ方法で音声解析
+        const pcmData = new Float32Array(analyser.fftSize);
+        let sumSquares = 0;
+        analyser.getFloatTimeDomainData(pcmData);
+        
+        for (const amplitude of pcmData) {
+          sumSquares += amplitude * amplitude;
+        }
+        
+        // ライブラリと同じRMS計算
+        const rms = Math.sqrt(sumSquares / pcmData.length * 20);
+        const clampedRms = Math.max(0, Math.min(10, rms)); // 異常値を制限
+        
+        // 音声の閾値を設定（静寂判定）
+        const silenceThreshold = 0.01; // この値以下は静寂とみなす
+        
+        if (clampedRms < silenceThreshold) {
+          // 静寂時は口を閉じる
+          const paramIndex = model.internalModel.coreModel.getParameterIndex('ParamMouthOpenY');
+          if (paramIndex >= 0) {
+            model.internalModel.coreModel.setParameterValueByIndex(paramIndex, 0);
+          }
+          return; // 処理を終了
+        }
+        
+        // ライブラリと同じパラメータ変換（調整版）
+        let value = clampedRms;
+        let min_ = 0;
+        const max_ = 0.8; // 最大値を0.8に制限（元々は1.0）
+        const weight = 0.6; // 重みを0.6に減少（元々は1.2）
+
+        if (value > 0) {
+          min_ = 0.2; // 最小値を0.2に減少（元々は0.4）
+        }
+
+        value = Math.max(min_, Math.min(max_, value * weight));
+
+        // パラメータ適用
+        const paramIndex = model.internalModel.coreModel.getParameterIndex('ParamMouthOpenY');
+        if (paramIndex >= 0) {
+          model.internalModel.coreModel.setParameterValueByIndex(paramIndex, value);
+        }
+
+        // デバッグログ（実際の音声検知時のみ）
+        if (rms > silenceThreshold) {
+          console.log(`[LIPSYNC] Real audio detected - RMS: ${rms.toFixed(3)}, Mouth: ${value.toFixed(3)}`);
+        }
+      } catch (e) {
+        console.warn('[LIPSYNC] Audio analysis error:', e);
+      }
+
+      if (animationId !== null) {
+        animationId = requestAnimationFrame(analyzeAudio);
+      }
+    };
+
+    let audioCapture: any = null;
+
+    // WebRTC音声ストリームを探す方法（改善版）
+    const setupWebRTCAudioMonitoring = () => {
+      console.log('[LIPSYNC] Searching for WebRTC audio streams...');
+      
+      const potentialConnections = [];
+      
+      // 1. セッションオブジェクトから詳細探索
+      if (session) {
+        console.log('[LIPSYNC] Deep scanning session object...');
+        const sessionObj = session as any;
+        
+        // セッションの基本構造をログ出力
+        console.log('[LIPSYNC] Session keys:', Object.keys(sessionObj));
+        console.log('[LIPSYNC] Session constructor:', sessionObj.constructor?.name);
+        
+        // プロトタイプチェーンも確認
+        let proto = Object.getPrototypeOf(sessionObj);
+        let level = 0;
+        while (proto && level < 3) {
+          console.log(`[LIPSYNC] Prototype level ${level}:`, Object.getOwnPropertyNames(proto));
+          proto = Object.getPrototypeOf(proto);
+          level++;
+        }
+        
+        // 内部の重要そうなプロパティをチェック
+        const importantKeys = [
+          'transport', 'connection', 'client', 'ws', 'webSocket', '_transport', '_connection',
+          'peerConnection', 'pc', 'rtc', 'audio', 'media', 'stream', '_pc', '_peerConnection',
+          '_webrtc', 'rtcPeerConnection', 'webRtcConnection', '_session', 'session'
+        ];
+        
+        importantKeys.forEach(key => {
+          if (sessionObj[key] !== undefined) {
+            console.log(`[LIPSYNC] Found session.${key}:`, typeof sessionObj[key], sessionObj[key]);
+          }
+        });
+        
+        // transport オブジェクトを詳細に調査
+        if (sessionObj.transport) {
+          console.log('[LIPSYNC] Investigating transport object...');
+          const transport = sessionObj.transport;
+          console.log('[LIPSYNC] Transport keys:', Object.keys(transport));
+          console.log('[LIPSYNC] Transport constructor:', transport.constructor?.name);
+          
+          // transport のプロパティをすべてチェック
+          Object.keys(transport).forEach(key => {
+            const value = transport[key];
+            console.log(`[LIPSYNC] transport.${key}:`, typeof value, value);
+            
+            // RTCPeerConnection を探す
+            if (value instanceof RTCPeerConnection) {
+              console.log(`[LIPSYNC] Found RTCPeerConnection at transport.${key}!`, value);
+              potentialConnections.push(value);
+            }
+          });
+          
+          // プロトタイプレベルのプロパティも実際に取得してみる
+          const prototypeProps = ['callId', 'status', 'connectionState', 'muted'];
+          prototypeProps.forEach(prop => {
+            if (prop in transport) {
+              try {
+                const value = transport[prop];
+                console.log(`[LIPSYNC] transport.${prop} (from prototype):`, typeof value, value);
+                
+                // connectionStateからRTCPeerConnectionを取得！
+                if (prop === 'connectionState' && value && value.peerConnection instanceof RTCPeerConnection) {
+                  console.log('[LIPSYNC] Found RTCPeerConnection in connectionState!', value.peerConnection);
+                  potentialConnections.push(value.peerConnection);
+                }
+              } catch (e) {
+                console.warn(`[LIPSYNC] Failed to access transport.${prop}:`, e);
+              }
+            }
+          });
+          
+          // transport のプロトタイプも調査
+          let transportProto = Object.getPrototypeOf(transport);
+          let level = 0;
+          while (transportProto && level < 2) {
+            console.log(`[LIPSYNC] Transport prototype level ${level}:`, Object.getOwnPropertyNames(transportProto));
+            level++;
+            transportProto = Object.getPrototypeOf(transportProto);
+          }
+          
+          // transport 内を再帰的に探索
+          const transportConnections = findRTCConnectionsInObject(transport, new Set(), 4);
+          if (transportConnections.length > 0) {
+            console.log('[LIPSYNC] Found RTC connections in transport:', transportConnections.length);
+            potentialConnections.push(...transportConnections);
+          }
+          
+          // プライベートプロパティとシンボルも探索
+          const allProps = [...Object.getOwnPropertyNames(transport), ...Object.getOwnPropertySymbols(transport)];
+          console.log('[LIPSYNC] All transport properties (including symbols):', allProps.length);
+          
+          allProps.forEach(prop => {
+            try {
+              const value = transport[prop];
+              if (value && typeof value === 'object') {
+                const propName = typeof prop === 'symbol' ? prop.toString() : prop;
+                console.log(`[LIPSYNC] Checking transport[${propName}]:`, typeof value, value?.constructor?.name);
+                
+                if (value instanceof RTCPeerConnection) {
+                  console.log(`[LIPSYNC] Found RTCPeerConnection in property ${propName}!`, value);
+                  potentialConnections.push(value);
+                }
+              }
+            } catch (e) {
+              // アクセスできないプロパティをスキップ
+            }
+          });
+        }
+        
+        const sessionConnections = findRTCConnectionsInObject(session, new Set(), 5); // より深く探索
+        potentialConnections.push(...sessionConnections);
+        
+        // セッション内のネストしたオブジェクトも調べる
+        const keysToCheck = ['transport', 'connection', 'client', 'ws', 'webSocket', '_transport', '_connection'];
+        keysToCheck.forEach(key => {
+          if (sessionObj[key]) {
+            const nestedConnections = findRTCConnectionsInObject(sessionObj[key], new Set(), 3);
+            potentialConnections.push(...nestedConnections);
+          }
+        });
+      }
+      
+      // 2. グローバル変数から探す（拡張版）
+      const globalConnections = [
+        (window as any).peerConnection,
+        (window as any).pc,
+        (window as any).rtcConnection,
+        (window as any).webrtc,
+        (window as any).openai,
+        (window as any).realtimeSession
+      ].filter(Boolean);
+      potentialConnections.push(...globalConnections);
+      
+      // WebSocket接続も確認（OpenAI Realtime APIがWebSocketを使用している可能性）
+      if (session) {
+        const sessionObj = session as any;
+        console.log('[LIPSYNC] Checking for WebSocket connections...');
+        
+        // WebSocket関連のプロパティを探す
+        const wsKeys = ['ws', 'webSocket', 'websocket', '_ws', '_webSocket', 'socket', 'connection'];
+        wsKeys.forEach(key => {
+          if (sessionObj[key] && sessionObj[key] instanceof WebSocket) {
+            console.log(`[LIPSYNC] Found WebSocket at session.${key}:`, sessionObj[key]);
+            console.log('[LIPSYNC] WebSocket state:', sessionObj[key].readyState);
+            console.log('[LIPSYNC] WebSocket protocol:', sessionObj[key].protocol);
+          }
+        });
+      }
+      
+      // 3. WebRTC統計APIを使用してアクティブな接続を検出
+      console.log('[LIPSYNC] Attempting to find WebRTC connections via global detection...');
+      
+      // RTCPeerConnectionのコンストラクタをモンキーパッチして既存の接続をキャッチする試行
+      if ((window as any).__webrtc_connections) {
+        console.log('[LIPSYNC] Found cached WebRTC connections:', (window as any).__webrtc_connections.length);
+        potentialConnections.push(...(window as any).__webrtc_connections);
+      }
+      
+      // より直接的なアプローチ：既知のWebRTC接続を探す
+      const possibleGlobalRefs = [
+        'webkitRTCPeerConnection',
+        'mozRTCPeerConnection', 
+        'RTCPeerConnection'
+      ];
+      
+      possibleGlobalRefs.forEach(ref => {
+        if ((window as any)[ref] && (window as any)[ref].prototype) {
+          console.log(`[LIPSYNC] Found WebRTC constructor: ${ref}`);
+        }
+      });
+      
+      // 現在のページでアクティブなMediaStreamを検出
+      console.log('[LIPSYNC] Checking for active MediaStreams...');
+      
+      // getUserMediaで作成されたストリームを探す
+      try {
+        navigator.mediaDevices.enumerateDevices().then(devices => {
+          console.log('[LIPSYNC] Available media devices:', devices.length);
+        }).catch(e => {
+          console.warn('[LIPSYNC] Failed to enumerate devices:', e);
+        });
+      } catch (e) {
+        console.warn('[LIPSYNC] Failed to access media devices:', e);
+      }
+      
+      console.log('[LIPSYNC] Found potential RTC connections:', potentialConnections.length);
+      
+      // 各接続を詳しく調べる
+      for (const pc of potentialConnections) {
+        if (pc instanceof RTCPeerConnection) {
+          console.log('[LIPSYNC] Examining RTC connection:', pc.connectionState, pc.iceConnectionState);
+          
+          const receivers = pc.getReceivers();
+          const audioReceivers = receivers.filter(r => r.track?.kind === 'audio');
+          
+          console.log('[LIPSYNC] RTC connection has audio receivers:', audioReceivers.length);
+          
+          // 全てのaudioReceiverをログ出力
+          audioReceivers.forEach((receiver, index) => {
+            const track = receiver.track;
+            if (track) {
+              console.log(`[LIPSYNC] Audio receiver ${index}:`, {
+                kind: track.kind,
+                id: track.id,
+                readyState: track.readyState,
+                enabled: track.enabled,
+                muted: track.muted
+              });
+            }
+          });
+          
+          // 生きているトラックを優先、なければ最初のトラックを使用
+          const liveReceivers = audioReceivers.filter(r => r.track?.readyState === 'live');
+          const targetReceivers = liveReceivers.length > 0 ? liveReceivers : audioReceivers;
+          
+          if (targetReceivers.length > 0) {
+            const track = targetReceivers[0].track;
+            if (track) {
+              try {
+                const stream = new MediaStream([track]);
+                const source = audioCtx.createMediaStreamSource(stream);
+                source.connect(analyser);
+                
+                console.log('[LIPSYNC] Connected to WebRTC audio stream (track state:', track.readyState, ')');
+                
+                return {
+                  connection: pc,
+                  track,
+                  source,
+                  dispose: () => {
+                    try {
+                      source.disconnect();
+                    } catch (e) {
+                      console.warn('Failed to disconnect WebRTC source:', e);
+                    }
+                  }
+                };
+              } catch (e) {
+                console.warn('[LIPSYNC] Failed to connect to WebRTC audio:', e);
+              }
+            }
+          }
+          
+          // trackイベントも監視（改善版）
+          const onTrack = (event: RTCTrackEvent) => {
+            console.log('[LIPSYNC] RTCTrackEvent:', {
+              kind: event.track.kind,
+              id: event.track.id,
+              readyState: event.track.readyState,
+              streamsCount: event.streams.length
+            });
+            
+            if (event.track.kind === 'audio') {
+              console.log('[LIPSYNC] New WebRTC audio track detected');
+              
+              try {
+                const stream = event.streams[0] || new MediaStream([event.track]);
+                const source = audioCtx.createMediaStreamSource(stream);
+                source.connect(analyser);
+                
+                console.log('[LIPSYNC] Connected to new WebRTC audio track');
+                isMonitoring = true;
+                
+                // 解析ループを再開
+                if (animationId === null) {
+                  animationId = requestAnimationFrame(analyzeAudio);
+                }
+              } catch (e) {
+                console.warn('[LIPSYNC] Failed to connect to new WebRTC track:', e);
+              }
+            }
+          };
+          
+          pc.addEventListener('track', onTrack);
+          
+          return {
+            connection: pc,
+            onTrack,
+            dispose: () => {
+              pc.removeEventListener('track', onTrack);
+              console.log('[LIPSYNC] WebRTC track listener removed');
+            }
+          };
+        }
+      }
+      
+      return null;
+    };
+
+    // オブジェクト内のRTCPeerConnectionを再帰的に探す
+    const findRTCConnectionsInObject = (obj: any, visited = new Set(), maxDepth = 3): RTCPeerConnection[] => {
+      if (maxDepth <= 0 || !obj || typeof obj !== 'object' || visited.has(obj)) {
+        return [];
+      }
+      
+      visited.add(obj);
+      const connections: RTCPeerConnection[] = [];
+      
+      if (obj instanceof RTCPeerConnection) {
+        connections.push(obj);
+      }
+      
+      for (const key of Object.keys(obj)) {
+        try {
+          const value = obj[key];
+          if (value && typeof value === 'object') {
+            connections.push(...findRTCConnectionsInObject(value, visited, maxDepth - 1));
+          }
+        } catch (e) {
+          // アクセスできないプロパティをスキップ
+        }
+      }
+      
+      return connections;
+    };
+
+    // 最終手段：Web Audio APIをハイジャックして全音声出力をキャプチャ
+    const setupAudioContextHijacking = () => {
+      console.log('[LIPSYNC] Attempting AudioContext hijacking...');
+      
+      try {
+        // すべてのAudioContextインスタンスを探す
+        const contexts: AudioContext[] = [];
+        
+        // グローバルオブジェクトから探す
+        if ((window as any).audioContext) {
+          contexts.push((window as any).audioContext);
+        }
+        
+        // AudioContextの作成をモニター（将来のインスタンス用）
+        const originalAudioContext = window.AudioContext;
+        const originalWebkitAudioContext = (window as any).webkitAudioContext;
+        
+        const wrapAudioContext = (OriginalContext: any) => {
+          return class extends OriginalContext {
+            constructor(...args: any[]) {
+              super(...args);
+              console.log('[LIPSYNC] New AudioContext created, attempting to hijack...');
+              contexts.push(this);
+              
+              // destination に接続されるすべての音声をキャプチャ
+              try {
+                const originalConnect = this.destination.connect;
+                this.destination.connect = function(...args: any[]) {
+                  console.log('[LIPSYNC] AudioContext destination connect called');
+                  return originalConnect.apply(this, args);
+                };
+              } catch (e) {
+                console.warn('[LIPSYNC] Failed to wrap destination.connect:', e);
+              }
+            }
+          };
+        };
+        
+        if (originalAudioContext) {
+          (window as any).AudioContext = wrapAudioContext(originalAudioContext);
+        }
+        if (originalWebkitAudioContext) {
+          (window as any).webkitAudioContext = wrapAudioContext(originalWebkitAudioContext);
+        }
+        
+        console.log('[LIPSYNC] AudioContext hijacking set up, found contexts:', contexts.length);
+        
+        return {
+          contexts,
+          dispose: () => {
+            // 元に戻す
+            if (originalAudioContext) {
+              (window as any).AudioContext = originalAudioContext;
+            }
+            if (originalWebkitAudioContext) {
+              (window as any).webkitAudioContext = originalWebkitAudioContext;
+            }
+          }
+        };
+      } catch (e) {
+        console.warn('[LIPSYNC] AudioContext hijacking failed:', e);
+        return null;
+      }
+    };
+
+    const startMonitoring = async () => {
+      if (isMonitoring) return;
+      
+      console.log('[LIPSYNC] Starting audio monitoring...');
+      isMonitoring = true;
+      
+      // 1. WebRTC音声ストリームを探す
+      audioCapture = setupWebRTCAudioMonitoring();
+      
+      // 2. システム音声キャプチャを試行
+      if (!audioCapture) {
+        audioCapture = await setupAudioCapture();
+      }
+      
+      // 3. ページ内audio要素監視をフォールバック
+      if (!audioCapture) {
+        audioCapture = setupPageAudioMonitoring();
+      }
+      
+      // 4. AudioContextハイジャッキングを試行
+      if (!audioCapture) {
+        const hijackResult = setupAudioContextHijacking();
+        if (hijackResult) {
+          audioCapture = hijackResult;
+        }
+      }
+      
+      // 5. 解析ループ開始（audio sourceが見つからなくても開始）
+      animationId = requestAnimationFrame(analyzeAudio);
+      
+      if (audioCapture) {
+        console.log('[LIPSYNC] Audio monitoring started successfully with method:', 
+                   audioCapture.connection ? 'WebRTC' : 
+                   audioCapture.stream ? 'System' : 
+                   audioCapture.element ? 'AudioElement' : 
+                   audioCapture.observer ? 'Observer' :
+                   audioCapture.contexts ? 'AudioContext Hijack' : 'Unknown');
+      } else {
+        console.log('[LIPSYNC] No immediate audio source found, continuing to monitor for new sources...');
+        // isMonitoringをfalseにしない - observer が動作中の可能性がある
+      }
+      
+      // 定期的にWebRTCコネクションを再チェック（5秒間隔）
+      const recheckInterval = setInterval(() => {
+        if (!audioCapture?.connection && !audioCapture?.element) {
+          console.log('[LIPSYNC] Rechecking for WebRTC connections...');
+          const newAudioCapture = setupWebRTCAudioMonitoring();
+          if (newAudioCapture) {
+            console.log('[LIPSYNC] Found new WebRTC connection during recheck');
+            if (audioCapture?.dispose) {
+              audioCapture.dispose();
+            }
+            audioCapture = newAudioCapture;
+            clearInterval(recheckInterval);
+          }
+        } else {
+          clearInterval(recheckInterval);
+        }
+      }, 5000);
+      
+      // 30秒後にintervalをクリア
+      setTimeout(() => {
+        clearInterval(recheckInterval);
+      }, 30000);
+    };
+
+    const stopMonitoring = () => {
+      console.log('[LIPSYNC] Stopping audio monitoring...');
+      isMonitoring = false;
+      
+      if (animationId !== null) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+      
+      if (audioCapture?.dispose) {
+        audioCapture.dispose();
+        audioCapture = null;
+      }
+      
+      // 口を閉じる
+      try {
+        const paramIndex = model.internalModel.coreModel.getParameterIndex('ParamMouthOpenY');
+        if (paramIndex >= 0) {
+          model.internalModel.coreModel.setParameterValueByIndex(paramIndex, 0);
+        }
+      } catch (e) {
+        console.warn('[LIPSYNC] Failed to close mouth:', e);
+      }
+    };
+
+    const resume = async () => {
+      try { 
+        await audioCtx.resume();
+        await startMonitoring();
+        console.log('[LIPSYNC] Audio-based lipsync resumed');
+      } catch (e) {
+        console.warn('[LIPSYNC] Failed to resume audio-based lipsync:', e);
+      }
+    };
+
+    const dispose = () => {
+      stopMonitoring();
+      
+      mm.currentAnalyzer = undefined;
+      mm.currentContext = undefined;
+      mm.currentAudio = undefined;
+      
+      try { audioCtx.close(); } catch {}
+      console.log('[LIPSYNC] Audio-based lipsync disposed');
+    };
+
+    // 手動トリガー機能（フォールバック機能付き）
+    const triggerSpeaking = () => {
+      console.log('[LIPSYNC] Manual trigger for audio-based lipsync (starting monitoring)');
+      startMonitoring();
+      
+      // 5秒後に音声ソースが見つからない場合、テキストベースリップシンクにフォールバック
+      setTimeout(() => {
+        if (!audioCapture?.connection && !audioCapture?.element && !audioCapture?.stream) {
+          console.log('[LIPSYNC] No audio source found after 5 seconds, falling back to text-based lipsync');
+          
+          // シンプルなテキストベースリップシンクを実行
+          const startTextBasedSync = () => {
+            let duration = 3000; // 3秒間
+            let startTime = Date.now();
+            
+            const animateFromText = () => {
+              const elapsed = Date.now() - startTime;
+              const progress = elapsed / duration;
+              
+              if (progress < 1) {
+                // 自然な口の動きをシミュレート
+                const intensity = Math.sin(elapsed * 0.01) * 0.3 + 0.2;
+                const variation = Math.sin(elapsed * 0.03) * 0.2;
+                const mouthValue = Math.max(0, Math.min(1, intensity + variation));
+                
+                try {
+                  const paramIndex = model.internalModel.coreModel.getParameterIndex('ParamMouthOpenY');
+                  if (paramIndex >= 0) {
+                    model.internalModel.coreModel.setParameterValueByIndex(paramIndex, mouthValue);
+                  }
+                } catch (e) {
+                  console.warn('[LIPSYNC] Failed to set mouth parameter in fallback:', e);
+                }
+                
+                requestAnimationFrame(animateFromText);
+              } else {
+                // 終了時に口を閉じる
+                try {
+                  const paramIndex = model.internalModel.coreModel.getParameterIndex('ParamMouthOpenY');
+                  if (paramIndex >= 0) {
+                    model.internalModel.coreModel.setParameterValueByIndex(paramIndex, 0);
+                  }
+                } catch (e) {
+                  console.warn('[LIPSYNC] Failed to close mouth in fallback:', e);
+                }
+              }
+            };
+            
+            animateFromText();
+          };
+          
+          startTextBasedSync();
+        }
+      }, 5000);
+    };
+
+    return { type: 'audioBased', resume, dispose, triggerSpeaking };
+  } catch (error) {
+    console.error('[LIPSYNC] Failed to setup audio-based lipsync:', error);
+    throw error;
+  }
+}
+
+/**
+ * テキストレスポンスタイミングでのシンプルリップシンク（フォールバック用）
  */
 export function setupTextBasedLipsync(model: Live2DModel, session: unknown) {
   try {
@@ -720,9 +1617,12 @@ export function setupRealtimeLipsync(model: Live2DModel, session: unknown) {
       return realAudioLipsync;
     }
     
-    // フォールバック: テキストベース
-    console.log('[LIPSYNC] Falling back to text-based lipsync');
-    return setupTextBasedLipsync(model, session);
+    // 音声ベースのリップシンクを優先（セッション情報も渡す）
+    console.log('[LIPSYNC] Setting up audio-based lipsync with session info');
+    return setupAudioBasedLipsync(model, session);
+    
+    // フォールバック: テキストベース（使用しない）
+    // return setupTextBasedLipsync(model, session);
     
     // 従来のアプローチも残しておく（デバッグ用）
     /*

@@ -178,9 +178,40 @@ export default function RealtimeChat({
         }
       });
 
-      // 追加のイベントリスナー
+      // 追加のイベントリスナー（音声データを詳しく調査）
       session.on("response.audio.delta", (event: { delta?: unknown }) => {
         console.log("Audio delta event:", event);
+        
+        // 音声データの詳細を調査
+        if (event.delta) {
+          console.log("Audio delta type:", typeof event.delta);
+          console.log("Audio delta constructor:", event.delta.constructor?.name);
+          
+          // ArrayBufferかどうかチェック
+          if (event.delta instanceof ArrayBuffer) {
+            console.log("Audio delta is ArrayBuffer, length:", event.delta.byteLength);
+            
+            // リップシンクに音声データを送信
+            if (lipsyncRef.current?.triggerSpeaking) {
+              console.log('[TIMING] Audio delta received, triggering lipsync');
+              // 実際の音声データでリップシンク処理
+              lipsyncRef.current.triggerSpeaking();
+            }
+          }
+          
+          // Base64文字列かどうかチェック
+          if (typeof event.delta === 'string') {
+            console.log("Audio delta is string, length:", event.delta.length);
+            if (event.delta.startsWith('data:audio/') || event.delta.length > 100) {
+              console.log("Audio delta appears to be audio data");
+              
+              if (lipsyncRef.current?.triggerSpeaking) {
+                console.log('[TIMING] Audio string data received, triggering lipsync');
+                lipsyncRef.current.triggerSpeaking();
+              }
+            }
+          }
+        }
       });
 
       session.on("response.text.delta", (event: { delta?: string }) => {
@@ -285,9 +316,26 @@ export default function RealtimeChat({
         }
       });
 
-      // すべてのイベントをログに出力
+      // すべてのイベントをログに出力（音声関連を詳細に）
       session.on("*", (event: unknown) => {
-        console.log("All events:", event);
+        const eventObj = event as any;
+        
+        // 音声関連のイベントを詳しくログ出力
+        if (eventObj?.type?.toLowerCase().includes('audio') || 
+            eventObj?.event?.toLowerCase().includes('audio')) {
+          console.log("Audio event detected:", eventObj);
+          
+          // 音声データがあるかチェック
+          if (eventObj.delta || eventObj.audio || eventObj.data) {
+            console.log("Audio data found in event:", {
+              delta: eventObj.delta ? 'has delta' : 'no delta',
+              audio: eventObj.audio ? 'has audio' : 'no audio', 
+              data: eventObj.data ? 'has data' : 'no data'
+            });
+          }
+        } else {
+          console.log("All events:", event);
+        }
       });
 
       await session.connect({
@@ -468,38 +516,33 @@ export default function RealtimeChat({
             音声会話を停止
           </button>
 
-          {/* 遅延調整デバッグUI */}
-          <div className="space-y-2 mt-4 p-3 bg-gray-50 rounded border">
-            <h5 className="text-xs font-medium text-gray-700">リップシンク遅延調整</h5>
-            <div className="flex items-center space-x-2">
-              <span className="text-xs text-gray-600">遅延:</span>
-              <input
-                type="range"
-                min="0"
-                max="2000"
-                step="100"
-                value={audioTimestamps.estimatedDelay}
-                onChange={(e) => setAudioTimestamps(prev => ({
-                  ...prev,
-                  estimatedDelay: parseInt(e.target.value)
-                }))}
-                className="flex-1"
-              />
-              <span className="text-xs text-gray-600 w-12">
-                {audioTimestamps.estimatedDelay}ms
-              </span>
-            </div>
+          {/* 音声ベースリップシンク制御UI */}
+          <div className="space-y-2 mt-4 p-3 bg-blue-50 rounded border">
+            <h5 className="text-xs font-medium text-blue-700">音声ベースリップシンク</h5>
+            <p className="text-xs text-blue-600">
+              実際の音声出力を監視してリップシンクを行います
+            </p>
             <button
-              onClick={() => {
+              onClick={async () => {
                 if (lipsyncRef.current?.triggerSpeaking) {
-                  console.log('[TIMING] Manual test with current delay:', audioTimestamps.estimatedDelay);
-                  lipsyncRef.current.triggerSpeaking(audioTimestamps.estimatedDelay);
+                  console.log('[LIPSYNC] Starting audio-based monitoring');
+                  console.log('[LIPSYNC] Current session object:', sessionRef.current);
+                  try {
+                    // システム音声キャプチャの許可を求める
+                    lipsyncRef.current.triggerSpeaking();
+                  } catch (e) {
+                    console.error('[LIPSYNC] Failed to start monitoring:', e);
+                    setError('音声キャプチャに失敗しました。ブラウザの設定を確認してください。');
+                  }
                 }
               }}
-              className="w-full px-2 py-1 bg-gray-400 text-white rounded text-xs hover:bg-gray-500"
+              className="w-full px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600"
             >
-              テスト実行
+              音声監視開始
             </button>
+            <div className="text-xs text-gray-600">
+              注意: ブラウザから画面共有の許可を求められる場合があります（音声キャプチャのため）
+            </div>
           </div>
         </div>
       )}
