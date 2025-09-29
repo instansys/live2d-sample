@@ -49,7 +49,7 @@ export default function RealtimeChat({
     estimatedDelay: number;
   }>({ textReceived: 0, audioStarted: 0, estimatedDelay: 500 }); // デフォルト500ms遅延
 
-  // Live2Dモデルが用意できたらリップシンクを設定
+  // Live2Dモデルが用意できたらリップシンクを設定し、自動で音声監視を開始
   useEffect(() => {
     if (live2dModel && sessionRef.current && isConnected && !lipsyncRef.current) {
       const setupLipsync = async () => {
@@ -59,9 +59,21 @@ export default function RealtimeChat({
           const lipsync = setupRealtimeLipsync(live2dModel, sessionRef.current);
           lipsyncRef.current = lipsync;
           
-          // ユーザー操作でaudio resumeを試行
-          lipsync.resume().catch((e) => {
+          // 音声再生の準備とリップシンク監視を自動開始
+          lipsync.resume().then(() => {
+            console.log('Lipsync resumed successfully');
+            // 自動で音声監視を開始
+            if (lipsync.triggerSpeaking) {
+              console.log('Auto-starting audio monitoring...');
+              lipsync.triggerSpeaking();
+            }
+          }).catch((e) => {
             console.warn('Initial lipsync resume failed:', e);
+            // エラーが発生しても音声監視は試行する
+            if (lipsync.triggerSpeaking) {
+              console.log('Auto-starting audio monitoring despite resume error...');
+              lipsync.triggerSpeaking();
+            }
             setError('音声再生の準備ができませんでした。ページをクリックしてください');
           });
         } catch (e) {
@@ -345,12 +357,22 @@ export default function RealtimeChat({
       setIsConnected(true);
       console.log("Realtime APIに接続しました！");
       
-      // リップシンクが既に設定されていればresumeを試行
+      // リップシンクが既に設定されていればresumeと監視を開始
       if (lipsyncRef.current) {
         try {
           await lipsyncRef.current.resume();
+          // 接続後に自動で音声監視を開始
+          if (lipsyncRef.current.triggerSpeaking) {
+            console.log('Auto-starting audio monitoring after connection...');
+            lipsyncRef.current.triggerSpeaking();
+          }
         } catch (e) {
           console.warn('Lipsync resume failed after connection:', e);
+          // エラーが発生しても音声監視は試行する
+          if (lipsyncRef.current?.triggerSpeaking) {
+            console.log('Auto-starting audio monitoring despite error...');
+            lipsyncRef.current.triggerSpeaking();
+          }
         }
       }
     } catch (e) {
@@ -516,34 +538,6 @@ export default function RealtimeChat({
             音声会話を停止
           </button>
 
-          {/* 音声ベースリップシンク制御UI */}
-          <div className="space-y-2 mt-4 p-3 bg-blue-50 rounded border">
-            <h5 className="text-xs font-medium text-blue-700">音声ベースリップシンク</h5>
-            <p className="text-xs text-blue-600">
-              実際の音声出力を監視してリップシンクを行います
-            </p>
-            <button
-              onClick={async () => {
-                if (lipsyncRef.current?.triggerSpeaking) {
-                  console.log('[LIPSYNC] Starting audio-based monitoring');
-                  console.log('[LIPSYNC] Current session object:', sessionRef.current);
-                  try {
-                    // システム音声キャプチャの許可を求める
-                    lipsyncRef.current.triggerSpeaking();
-                  } catch (e) {
-                    console.error('[LIPSYNC] Failed to start monitoring:', e);
-                    setError('音声キャプチャに失敗しました。ブラウザの設定を確認してください。');
-                  }
-                }
-              }}
-              className="w-full px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600"
-            >
-              音声監視開始
-            </button>
-            <div className="text-xs text-gray-600">
-              注意: ブラウザから画面共有の許可を求められる場合があります（音声キャプチャのため）
-            </div>
-          </div>
         </div>
       )}
 
