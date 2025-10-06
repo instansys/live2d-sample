@@ -5,7 +5,7 @@ import { Live2DModel } from "pixi-live2d-display-lipsyncpatch/cubism4";
 import RealtimeChat from "../components/RealtimeChat";
 
 const setModelPosition = (app: Application, model: Live2DModel) => {
-  const scale = (app.renderer.width * 1.6) / model.width;
+  const scale = (app.renderer.width * 0.6) / model.width;
   model.scale.set(scale);
   model.x = app.renderer.width / 2;
   model.y = app.renderer.height - model.height * scale * 0.1;
