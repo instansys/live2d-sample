@@ -15,8 +15,6 @@ import { wireLipsyncFromMediaStream } from "@/lib/lipsync";
 import "dotenv/config";
 
 interface GeminiLiveChatProps {
-  onTranscript?: (transcript: string) => void;
-  onResponse?: (response: string) => void;
   conversationHistory?: Array<{
     type: "user" | "assistant";
     content: string;
@@ -33,8 +31,6 @@ interface GeminiLiveChatProps {
 }
 
 export default function GeminiLiveChat({
-  onTranscript,
-  onResponse,
   conversationHistory = [],
   onHistoryUpdate,
   live2dModel,
@@ -42,8 +38,6 @@ export default function GeminiLiveChat({
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [transcript, setTranscript] = useState<string>("");
-  const [response, setResponse] = useState<string>("");
   const [textInput, setTextInput] = useState<string>("");
   const [isSending, setIsSending] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -187,8 +181,6 @@ export default function GeminiLiveChat({
       } catch {}
     }
     setIsConnected(false);
-    setTranscript("");
-    setResponse("");
     console.log("接続を切断しました");
   };
 
